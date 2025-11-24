@@ -1,0 +1,235 @@
+---
+title: "小组作业2"
+output: html_document
+date: "2025-11-18"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+
+library(readr)    
+library(tidyverse)
+library(lubridate)
+library(gtsummary)
+library(plotly) 
+
+ecom_df_v2 <- read_csv("group project/ecommerce_customer_behavior_dataset_v2.csv")
+raw_v2 <- ecom_df_v2
+
+
+raw_v2$Date <- ymd(raw_v2$Date)
+
+ref_day <- max(raw_v2$Date, na.rm = TRUE) + days(1)
+
+rfm_v2 <- raw_v2 %>%
+  group_by(Customer_ID) %>%
+  summarise(
+    R = as.numeric(ref_day - max(Date, na.rm = TRUE)),  
+    F = n_distinct(Order_ID),
+    M = sum(Total_Amount, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    Repeat_Flag = ifelse(F > 1, 1, 0),
+    Repeat_Label = factor(Repeat_Flag,
+                          levels = c(0, 1),
+                          labels = c("One-Time Buyer", "Repeat Buyer"))
+  )
+
+
+cat("\n========== Customer Split (Just a Quick Check) ==========\n")
+
+cust_split <- rfm_v2 %>%
+  count(Repeat_Label) %>%
+  mutate(Percent = round(n / sum(n) * 100, 2))
+
+print(cust_split)
+
+
+cat("\n================= RFM Summary by Group =================\n")
+
+rfm_tbl <- rfm_v2 %>%
+  select(R, F, M, Repeat_Label) %>%
+  tbl_summary(
+    by = Repeat_Label,
+    statistic = list(all_continuous() ~ "{mean} ({sd})"),
+    label = list(
+      R ~ "Recency (days)",
+      F ~ "Frequency",
+      M ~ "Monetary Amount"
+    ),
+    missing = "no"
+  ) %>%
+  add_n() %>%
+  bold_labels()
+
+rfm_tbl
+
+cat("\n================ Logistic Regression Model ===============\n")
+
+logit_data <- rfm_v2 %>%
+  mutate(
+    R_std  = scale(R),
+    F_log  = log1p(F),
+    M_log  = log1p(M)
+  )
+
+logit_fit <- glm(
+  Repeat_Flag ~ R_std + F_log + M_log,
+  data = logit_data,
+  family = binomial(link = "logit")
+)
+
+logit_summary <- logit_fit %>%
+  tbl_regression(
+    exponentiate = TRUE,
+    label = list(
+      R_std ~ "Recency (std)",
+      F_log ~ "Frequency (log)",
+      M_log ~ "Monetary (log)"
+    )
+  )
+
+logit_summary
+
+
+cat("\n===================== 3D RFM Plot ======================\n")
+
+rfm_plot_df <- rfm_v2 %>%
+  mutate(
+    R_val = log1p(max(R) - R + 1),   
+    F_val = log1p(F),
+    M_val = log1p(M)
+  )
+
+rfm_plot <- rfm_plot_df %>%
+  plot_ly(
+    x = ~R_val,
+    y = ~F_val,
+    z = ~M_val,
+    color = ~Repeat_Label,
+    colors = c("One-Time Buyer" = "#FF8C00", "Repeat Buyer" = "#0066CC"),
+    marker = list(size = 3)
+  ) %>%
+  add_markers() %>%
+  layout(
+    title = "3D RFM Scatterplot",
+    scene = list(
+      xaxis = list(title = "Recency (rev/log)"),
+      yaxis = list(title = "Frequency (log)"),
+      zaxis = list(title = "Monetary (log)")
+    )
+  )
+
+rfm_plot
+
+cat("\n==================== Churn Driver Analysis ====================\n")
+
+merged_v2 <- raw_v2 %>%
+  left_join(rfm_v2 %>% select(Customer_ID, Repeat_Label),
+            by = "Customer_ID")
+
+ot_first <- merged_v2 %>%
+  filter(Repeat_Label == "One-Time Buyer") %>%
+  group_by(Customer_ID) %>%
+  slice_min(Date, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+cat("\n------ Product Category Churn Table ------\n")
+
+cat_churn <- merged_v2 %>%
+  group_by(Product_Category) %>%
+  summarise(
+    Total_Orders = n(),
+    One_Time_Orders = sum(Repeat_Label == "One-Time Buyer"),
+    Repeat_Orders   = sum(Repeat_Label == "Repeat Buyer"),
+    Churn_Rate = round(One_Time_Orders / Total_Orders * 100, 2)
+  ) %>%
+  arrange(desc(Churn_Rate))
+
+print(cat_churn)
+
+cat("\n------ Delivery Time & Rating Comparison ------\n")
+
+non_rfm_tbl <- merged_v2 %>%
+  select(Delivery_Time_Days, Customer_Rating, Repeat_Label) %>%
+  tbl_summary(
+    by = Repeat_Label,
+    statistic = list(all_continuous() ~ "{mean} ({sd})"),
+    label = list(
+      Delivery_Time_Days ~ "Delivery Time (days)",
+      Customer_Rating ~ "Customer Rating"
+    )
+  ) %>%
+  add_n() %>%
+  bold_labels()
+
+non_rfm_tbl
+
+cat("\n------ One-Time Buyer Quality Metrics ------\n")
+
+ot_metrics <- ot_first %>%
+  summarise(
+    N = n(),
+    Low_Rate_Pct   = round(sum(Customer_Rating <= 2) / N * 100, 2),
+    Slow_Del_Pct   = round(sum(Delivery_Time_Days > 7) / N * 100, 2),
+    Fatal_Combo_Pct = round(sum(Customer_Rating <= 2 &
+                                Delivery_Time_Days > 7) / N * 100, 2)
+  )
+
+ot_metrics
+
+cat("\n================ RFM Segmentation Summary ================\n")
+
+rfm_seg <- rfm_v2 %>%
+  mutate(
+    R_score = ntile(desc(R), 5),  
+    F_score = ntile(F, 5),
+    M_score = ntile(M, 5),
+    RFM_Score = paste0(R_score, F_score, M_score),
+    Segment = case_when(
+      R_score >= 4 & F_score >= 4 & M_score >= 4 ~ "Champions",
+      R_score >= 4 & F_score >= 4                ~ "Loyal",
+      R_score >= 3 & F_score >= 3 & M_score >= 3 ~ "Potential Loyal",
+      R_score >= 4                               ~ "Recent Active",
+      R_score <= 2 & F_score <= 2 & M_score <= 2 ~ "Hibernating",
+      R_score <= 1 & F_score <= 1 & M_score <= 1 ~ "Can't Lose Them",
+      R_score <= 2 & F_score >= 3 & M_score >= 3 ~ "At Risk",
+      TRUE ~ "Others"
+    )
+  )
+
+seg_summary <- rfm_seg %>%
+  group_by(Segment) %>%
+  summarise(
+    N = n(),
+    Percent = round(N / nrow(rfm_seg) * 100, 2),
+    Avg_R = mean(R),
+    Avg_F = mean(F),
+    Avg_M = mean(M)
+  ) %>%
+  arrange(desc(N))
+
+seg_summary
